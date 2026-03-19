@@ -11,6 +11,14 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing lassoid" });
   }
 
+  if (!process.env.LASSO_API_KEY) {
+    return res.status(500).json({ error: "Missing LASSO_API_KEY" });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+  }
+
   try {
     const response = await fetch(
       `https://api.lassox.com/${lassoid}/reports/latest/pdf`,
@@ -32,18 +40,6 @@ export default async function handler(req, res) {
     const contentType = response.headers.get("content-type") || "";
     const raw = await response.text();
 
-    const decodeEntities = (text) => {
-      return text
-        .replace(/&#173;/g, "")
-        .replace(/&#160;/g, " ")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'");
-    };
-
     const cleanedText = decodeEntities(
       raw
         .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -52,6 +48,15 @@ export default async function handler(req, res) {
         .replace(/\s+/g, " ")
         .trim()
     );
+
+    if (!cleanedText || cleanedText.length < 100) {
+      return res.status(422).json({
+        error: "Extracted text is too short",
+        source: contentType.includes("xhtml") ? "ixbrl" : contentType,
+        contentType,
+        lassoid
+      });
+    }
 
     const analysis = await analyzeReportWithLLM(cleanedText, lassoid);
 
@@ -63,9 +68,21 @@ export default async function handler(req, res) {
     });
   } catch (error) {
     return res.status(500).json({
-      error: error.message
+      error: error.message || "Unknown server error"
     });
   }
+}
+
+function decodeEntities(text) {
+  return text
+    .replace(/&#173;/g, "")
+    .replace(/&#160;/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
 }
 
 async function analyzeReportWithLLM(text, lassoid) {
@@ -76,35 +93,38 @@ async function analyzeReportWithLLM(text, lassoid) {
     input: [
       {
         role: "system",
-        content: `
-Du analyserer tekst fra en dansk årsrapport.
-
-Returner KUN gyldig JSON med disse felter:
-- company_name
-- cvr
-- report_period
-- business_description
-- management_commentary
-- auditor_statement
-- risk_signals
-- qualitative_signals
-- investment_takeaway
-
-Regler:
-- Brug kun information, der fremgår af teksten.
-- Hvis noget ikke kan findes sikkert, brug null.
-- risk_signals og qualitative_signals skal være arrays af strings.
-- Svar kun med JSON.
-        `.trim()
+        content: [
+          {
+            type: "input_text",
+            text:
+              "Du analyserer tekst fra en dansk årsrapport. " +
+              "Returner kun gyldig JSON. " +
+              "Brug kun information, der fremgår af teksten. " +
+              "Hvis noget ikke kan findes sikkert, brug null. " +
+              "risk_signals og qualitative_signals skal være arrays af strings."
+          }
+        ]
       },
       {
         role: "user",
-        content: `
-Lassoid: ${lassoid}
-
-Rapporttekst:
-${trimmedText}
-        `.trim()
+        content: [
+          {
+            type: "input_text",
+            text:
+              `Udtræk følgende felter fra årsrapporten:\n\n` +
+              `- company_name\n` +
+              `- cvr\n` +
+              `- report_period\n` +
+              `- business_description\n` +
+              `- management_commentary\n` +
+              `- auditor_statement\n` +
+              `- risk_signals\n` +
+              `- qualitative_signals\n` +
+              `- investment_takeaway\n\n` +
+              `Lassoid: ${lassoid}\n\n` +
+              `Rapporttekst:\n${trimmedText}`
+          }
+        ]
       }
     ],
     text: {
@@ -147,6 +167,10 @@ ${trimmedText}
       }
     }
   });
+
+  if (!response.output_text) {
+    throw new Error("LLM returned empty output");
+  }
 
   return JSON.parse(response.output_text);
 }
