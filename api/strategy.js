@@ -1,9 +1,3 @@
-import OpenAI from "openai";
-
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
 export default async function handler(req, res) {
   const { lassoid } = req.query;
 
@@ -20,7 +14,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const response = await fetch(
+    const reportResponse = await fetch(
       `https://api.lassox.com/${lassoid}/reports/latest/pdf`,
       {
         headers: {
@@ -29,16 +23,16 @@ export default async function handler(req, res) {
       }
     );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(response.status).json({
+    if (!reportResponse.ok) {
+      const errorText = await reportResponse.text();
+      return res.status(reportResponse.status).json({
         error: "Report fetch failed",
         details: errorText
       });
     }
 
-    const contentType = response.headers.get("content-type") || "";
-    const raw = await response.text();
+    const contentType = reportResponse.headers.get("content-type") || "";
+    const raw = await reportResponse.text();
 
     const cleanedText = decodeEntities(
       raw
@@ -88,89 +82,100 @@ function decodeEntities(text) {
 async function analyzeReportWithLLM(text, lassoid) {
   const trimmedText = text.slice(0, 20000);
 
-  const response = await client.responses.create({
-    model: "gpt-5",
-    input: [
-      {
-        role: "system",
-        content: [
-          {
-            type: "input_text",
-            text:
-              "Du analyserer tekst fra en dansk årsrapport. " +
-              "Returner kun gyldig JSON. " +
-              "Brug kun information, der fremgår af teksten. " +
-              "Hvis noget ikke kan findes sikkert, brug null. " +
-              "risk_signals og qualitative_signals skal være arrays af strings."
-          }
-        ]
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text:
-              `Udtræk følgende felter fra årsrapporten:\n\n` +
-              `- company_name\n` +
-              `- cvr\n` +
-              `- report_period\n` +
-              `- business_description\n` +
-              `- management_commentary\n` +
-              `- auditor_statement\n` +
-              `- risk_signals\n` +
-              `- qualitative_signals\n` +
-              `- investment_takeaway\n\n` +
-              `Lassoid: ${lassoid}\n\n` +
-              `Rapporttekst:\n${trimmedText}`
-          }
-        ]
-      }
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "annual_report_analysis",
-        strict: true,
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            company_name: { type: ["string", "null"] },
-            cvr: { type: ["string", "null"] },
-            report_period: { type: ["string", "null"] },
-            business_description: { type: ["string", "null"] },
-            management_commentary: { type: ["string", "null"] },
-            auditor_statement: { type: ["string", "null"] },
-            risk_signals: {
-              type: "array",
-              items: { type: "string" }
-            },
-            qualitative_signals: {
-              type: "array",
-              items: { type: "string" }
-            },
-            investment_takeaway: { type: ["string", "null"] }
-          },
-          required: [
-            "company_name",
-            "cvr",
-            "report_period",
-            "business_description",
-            "management_commentary",
-            "auditor_statement",
-            "risk_signals",
-            "qualitative_signals",
-            "investment_takeaway"
+  const openaiResponse = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: "gpt-5",
+      input: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text:
+                "Du analyserer tekst fra en dansk årsrapport. Returner kun gyldig JSON. Brug kun information, der fremgår af teksten. Hvis noget ikke kan findes sikkert, brug null. risk_signals og qualitative_signals skal være arrays af strings."
+            }
+          ]
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text:
+                `Udtræk følgende felter fra årsrapporten:\n\n` +
+                `- company_name\n` +
+                `- cvr\n` +
+                `- report_period\n` +
+                `- business_description\n` +
+                `- management_commentary\n` +
+                `- auditor_statement\n` +
+                `- risk_signals\n` +
+                `- qualitative_signals\n` +
+                `- investment_takeaway\n\n` +
+                `Lassoid: ${lassoid}\n\n` +
+                `Rapporttekst:\n${trimmedText}`
+            }
           ]
         }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "annual_report_analysis",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              company_name: { type: ["string", "null"] },
+              cvr: { type: ["string", "null"] },
+              report_period: { type: ["string", "null"] },
+              business_description: { type: ["string", "null"] },
+              management_commentary: { type: ["string", "null"] },
+              auditor_statement: { type: ["string", "null"] },
+              risk_signals: {
+                type: "array",
+                items: { type: "string" }
+              },
+              qualitative_signals: {
+                type: "array",
+                items: { type: "string" }
+              },
+              investment_takeaway: { type: ["string", "null"] }
+            },
+            required: [
+              "company_name",
+              "cvr",
+              "report_period",
+              "business_description",
+              "management_commentary",
+              "auditor_statement",
+              "risk_signals",
+              "qualitative_signals",
+              "investment_takeaway"
+            ]
+          }
+        }
       }
-    }
+    })
   });
 
-  if (!response.output_text) {
-    throw new Error("LLM returned empty output");
+  const payload = await openaiResponse.json();
+
+  if (!openaiResponse.ok) {
+    throw new Error(
+      payload?.error?.message || "OpenAI request failed"
+    );
   }
 
-  return JSON.parse(response.output_text);
+  if (!payload.output_text) {
+    throw new Error("OpenAI returned empty output");
+  }
+
+  return JSON.parse(payload.output_text);
 }
